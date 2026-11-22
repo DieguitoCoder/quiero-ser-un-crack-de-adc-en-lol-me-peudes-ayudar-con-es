@@ -1,0 +1,107 @@
+/*
+ * Owner: lumen. Climb Tracker design tokens (Tailwind v4 @theme).
+ * Dark League-of-Legends-inspired palette: deep navy, gold accents, hextech blue.
+ * Every text token below meets WCAG AA (>= 4.5:1) on bg, surface and surface-2
+ * (surface-3 is for hover/fill states; keep subtle/loss text off it).
+ * Usage: bg-surface, text-muted, border-border, text-gold, bg-blue, text-tier-gold, ...
+ */
+@import "tailwindcss";
+
+@theme {
+  /* Fonts: system stacks only (no font dependencies). */
+  --font-sans: ui-sans-serif, system-ui, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-display: "Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif;
+  --font-mono: ui-monospace, "Cascadia Mono", Consolas, "Liberation Mono", monospace;
+
+  /* Surfaces (deep navy) */
+  --color-bg: #0a1428;
+  --color-surface: #0f1d34;
+  --color-surface-2: #16284a;
+  --color-surface-3: #1e3358;
+  --color-border: #2a3e60;
+  --color-border-strong: #3d5680;
+
+  /* Text */
+  --color-text: #f0e6d2;
+  --color-muted: #a9b4c6;
+  --color-subtle: #8d9ab0;
+
+  /* Gold accents */
+  --color-gold: #c8aa6e;
+  --color-gold-bright: #f0d595;
+  --color-gold-dark: #785a28;
+  --color-gold-deep: #463714;
+
+  /* Hextech blue */
+  --color-blue: #0ac8b9;
+  --color-blue-bright: #5ee6db;
+  --color-blue-dark: #0397ab;
+  --color-blue-deep: #0a323c;
+
+  /* Semantic (text-safe on all surfaces) */
+  --color-win: #4cc38a;
+  --color-loss: #f07178;
+  --color-warn: #e8b64c;
+  --color-info: #6cb4f0;
+
+  /* Tier colors (text-safe on surfaces) */
+  --color-tier-iron: #a39e98;
+  --color-tier-bronze: #cd8f62;
+  --color-tier-silver: #b8c6d0;
+  --color-tier-gold: #e6c05e;
+  --color-tier-platinum: #4fd1c5;
+  --color-tier-emerald: #3ccf8e;
+  --color-tier-diamond: #8bb0ff;
+  --color-tier-master: #c99af8;
+  --color-tier-grandmaster: #f5737b;
+  --color-tier-challenger: #f4d98a;
+
+  /* Elevation */
+  --shadow-card: 0 1px 0 0 rgb(200 170 110 / 0.06) inset, 0 8px 24px -12px rgb(0 0 0 / 0.6);
+  --shadow-glow-gold: 0 0 0 1px rgb(200 170 110 / 0.35), 0 0 18px -4px rgb(200 170 110 / 0.35);
+  --shadow-glow-blue: 0 0 0 1px rgb(10 200 185 / 0.35), 0 0 18px -4px rgb(10 200 185 / 0.35);
+
+  /* Radius */
+  --radius-card: 0.75rem;
+}
+
+html {
+  color-scheme: dark;
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  min-height: 100dvh;
+  background-color: var(--color-bg);
+  background-image:
+    radial-gradient(60rem 30rem at 85% -10%, rgb(10 200 185 / 0.07), transparent 70%),
+    radial-gradient(50rem 28rem at 0% 0%, rgb(200 170 110 / 0.06), transparent 70%);
+  background-attachment: fixed;
+  color: var(--color-text);
+  font-family: var(--font-sans);
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+::selection {
+  background-color: rgb(200 170 110 / 0.35);
+  color: var(--color-text);
+}
+
+/* Visible keyboard focus everywhere (components may add their own ring on top). */
+:focus-visible {
+  outline: 2px solid var(--color-blue-bright);
+  outline-offset: 2px;
+}
+
+/* Respect reduced-motion preferences globally. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

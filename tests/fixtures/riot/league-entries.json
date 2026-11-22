@@ -1,0 +1,30 @@
+[
+  {
+    "leagueId": "mock-league-0001",
+    "queueType": "RANKED_SOLO_5x5",
+    "tier": "BRONZE",
+    "rank": "III",
+    "puuid": "mock-puuid-xdieguinho-9250-0000000000000000000000000000000000000000",
+    "leaguePoints": 45,
+    "wins": 30,
+    "losses": 28,
+    "veteran": false,
+    "inactive": false,
+    "freshBlood": false,
+    "hotStreak": false
+  },
+  {
+    "leagueId": "mock-league-0002",
+    "queueType": "RANKED_FLEX_SR",
+    "tier": "SILVER",
+    "rank": "IV",
+    "puuid": "mock-puuid-xdieguinho-9250-0000000000000000000000000000000000000000",
+    "leaguePoints": 10,
+    "wins": 6,
+    "losses": 5,
+    "veteran": false,
+    "inactive": false,
+    "freshBlood": true,
+    "hotStreak": false
+  }
+]
