@@ -1,5 +1,6 @@
 /** Riot DTO → domain mapping. Pure. Owner: cobalt. */
 import type { LeagueEntryDto, MatchDto, ParticipantDto } from "@/lib/riot/dto";
+import type { MatchWrite } from "@/lib/db/repos";
 import { SOLO_QUEUE_TYPE, type Division, type MatchRecord, type TeamPosition, type Tier } from "@/lib/types";
 
 /** Games shorter than this are treated as remakes even without the early-surrender flag. */
@@ -32,35 +33,35 @@ function cs(p: ParticipantDto): number {
   return Math.max(0, num(p.totalMinionsKilled) + num(p.neutralMinionsKilled));
 }
 
-/** null when `puuid` did not play the match. Lane opponent = enemy with the same non-empty teamPosition. */
-export function mapMatch(dto: MatchDto, puuid: string): MatchRecord | null {
-  const participants = dto.info?.participants ?? [];
-  const me = participants.find((p) => p.puuid === puuid);
-  if (!me) return null;
+type ParticipantRecord = Omit<MatchRecord, "matchId" | "gameCreation" | "gameDurationS" | "queueId" | "patch" | "isRemake">;
 
+function isArena(p: ParticipantDto): boolean {
+  return typeof p.playerSubteamId === "number" && p.playerSubteamId > 0;
+}
+
+/** Team key: Arena duos share playerSubteamId (teamId is 0 there); SR uses teamId. */
+function teamKey(p: ParticipantDto): string {
+  return isArena(p) ? `s${p.playerSubteamId}` : `t${p.teamId}`;
+}
+
+/** Lane opponent = enemy with the same non-empty teamPosition (SR only). */
+function mapParticipant(participants: readonly ParticipantDto[], me: ParticipantDto): ParticipantRecord {
   const teamId = me.teamId === 200 ? 200 : 100;
   const position: TeamPosition = POSITIONS.includes(me.teamPosition) ? (me.teamPosition as TeamPosition) : "";
 
   let opponent: ParticipantDto | null = null;
-  if (position !== "") {
+  if (position !== "" && !isArena(me)) {
     const candidates = participants.filter((p) => p.teamId !== me.teamId && p.teamPosition === position);
     opponent = candidates.length === 1 ? (candidates[0] ?? null) : null;
   }
 
-  const teamKills = participants.filter((p) => p.teamId === me.teamId).reduce((sum, p) => sum + num(p.kills), 0);
-
+  const myTeam = teamKey(me);
+  const teamKills = participants.filter((p) => teamKey(p) === myTeam).reduce((sum, p) => sum + num(p.kills), 0);
   const myLane10 = optNum(me.challenges?.laneMinionsFirst10Minutes);
   const oppLane10 = opponent ? optNum(opponent.challenges?.laneMinionsFirst10Minutes) : null;
-  const durationS = Math.max(0, num(dto.info.gameDuration));
 
   return {
-    matchId: dto.metadata.matchId,
-    gameCreation: num(dto.info.gameCreation),
-    gameDurationS: durationS,
-    queueId: num(dto.info.queueId),
-    patch: patchFromGameVersion(dto.info.gameVersion ?? ""),
-    isRemake: me.gameEndedInEarlySurrender === true || durationS < REMAKE_MAX_DURATION_S,
-    puuid,
+    puuid: me.puuid,
     championId: num(me.championId),
     championName: me.championName,
     teamId,
@@ -83,6 +84,43 @@ export function mapMatch(dto: MatchDto, puuid: string): MatchRecord | null {
   };
 }
 
+function matchHeader(dto: MatchDto, me: ParticipantDto | undefined) {
+  const durationS = Math.max(0, num(dto.info.gameDuration));
+  return {
+    matchId: dto.metadata.matchId,
+    gameCreation: num(dto.info.gameCreation),
+    gameDurationS: durationS,
+    queueId: num(dto.info.queueId),
+    patch: patchFromGameVersion(dto.info.gameVersion ?? ""),
+    isRemake: me?.gameEndedInEarlySurrender === true || durationS < REMAKE_MAX_DURATION_S,
+  };
+}
+
+/** null when `puuid` did not play the match. */
+export function mapMatch(dto: MatchDto, puuid: string): MatchRecord | null {
+  const participants = dto.info?.participants ?? [];
+  const me = participants.find((p) => p.puuid === puuid);
+  if (!me) return null;
+  return { ...matchHeader(dto, me), ...mapParticipant(participants, me) };
+}
+
+/** v2: the whole match with EVERY participant (shared match store, ADR-012). Arena keeps placement 1..8. */
+export function mapMatchWrite(dto: MatchDto, platform: string): MatchWrite {
+  const participants = (dto.info?.participants ?? []).filter((p) => typeof p.puuid === "string" && p.puuid !== "");
+  const header = matchHeader(dto, participants[0]);
+  return {
+    ...header,
+    platform: platform.toLowerCase(),
+    isRemake: participants.some((p) => p.gameEndedInEarlySurrender === true) || header.isRemake,
+    participants: participants.map((p) => ({
+      ...mapParticipant(participants, p),
+      riotIdGameName: typeof p.riotIdGameName === "string" && p.riotIdGameName !== "" ? p.riotIdGameName : null,
+      riotIdTagLine: typeof p.riotIdTagline === "string" && p.riotIdTagline !== "" ? p.riotIdTagline : null,
+      placement: isArena(p) ? optNum(p.placement ?? p.subteamPlacement) : null,
+    })),
+  };
+}
+
 /** "14.23.612.3456" → "14.23" */
 export function patchFromGameVersion(gameVersion: string): string {
   const [major, minor] = gameVersion.split(".");
@@ -92,7 +130,15 @@ export function patchFromGameVersion(gameVersion: string): string {
 export function soloQueueEntry(
   entries: readonly LeagueEntryDto[],
 ): { tier: Tier; division: Division; lp: number; wins: number; losses: number } | null {
-  const entry = entries.find((e) => e.queueType === SOLO_QUEUE_TYPE);
+  return rankedEntry(entries, SOLO_QUEUE_TYPE);
+}
+
+/** League entry for one queueType ("RANKED_SOLO_5x5" | "RANKED_FLEX_SR"); null = unranked there. */
+export function rankedEntry(
+  entries: readonly LeagueEntryDto[],
+  queueType: string,
+): { tier: Tier; division: Division; lp: number; wins: number; losses: number } | null {
+  const entry = entries.find((e) => e.queueType === queueType);
   if (!entry || !TIERS.includes(entry.tier)) return null;
   const tier = entry.tier as Tier;
   // Master+ always report "I"; be lenient if Riot omits it.

@@ -33,6 +33,14 @@ export interface ParticipantDto {
   visionWardsBoughtInGame: number;
   gameEndedInEarlySurrender?: boolean;
   challenges?: ParticipantChallengesDto;
+  riotIdGameName?: string;
+  /** Riot spells it "Tagline" */
+  riotIdTagline?: string;
+  /** Arena (1700/1710): duo id 1..8; teamId is 0 there */
+  playerSubteamId?: number;
+  /** Arena: final placement 1..8 */
+  placement?: number;
+  subteamPlacement?: number;
 }
 
 export interface MatchDto {

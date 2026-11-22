@@ -7,11 +7,12 @@
  */
 import type { AccountDto, LeagueEntryDto, MatchDto, SummonerDto } from "@/lib/riot/dto";
 import { RiotApiError } from "@/lib/riot/errors";
+import type { GlobalLimiter } from "@/lib/riot/global-limiter";
 import { systemClock, type Clock, type RateLimiter } from "@/lib/riot/rate-limiter";
 
 export interface MatchIdsQuery {
-  /** always 420 */
-  queue: number;
+  /** optional queue filter; v2 omits it (all queues) */
+  queue?: number;
   start: number;
   /** 1..100 */
   count: number;
@@ -20,7 +21,7 @@ export interface MatchIdsQuery {
 export interface RiotClient {
   /** GET https://{region}.api.riotgames.com/riot/account/v1/accounts/by-riot-id/{gameName}/{tagLine} */
   getAccountByRiotId(gameName: string, tagLine: string): Promise<AccountDto>;
-  /** GET https://{region}.api.riotgames.com/lol/match/v5/matches/by-puuid/{puuid}/ids?queue=420&start=&count= (newest first) */
+  /** GET https://{region}.api.riotgames.com/lol/match/v5/matches/by-puuid/{puuid}/ids?[queue=]&start=&count= (newest first) */
   getMatchIds(puuid: string, query: MatchIdsQuery): Promise<string[]>;
   /** GET https://{region}.api.riotgames.com/lol/match/v5/matches/{matchId} */
   getMatch(matchId: string): Promise<MatchDto>;
@@ -40,6 +41,12 @@ export interface HttpRiotClientOptions {
   fetchImpl?: typeof fetch;
   /** retries for 429 (honours Retry-After) and 5xx/network (backoff 500ms·2^n). Default 3. */
   maxRetries?: number;
+  /** v2: cross-instance limiter (Postgres). Denied slot → RiotApiError("rate_limited") without sleeping. */
+  globalLimiter?: GlobalLimiter;
+  /** v2: never sleep on 429 (end the batch instead). Default true. */
+  retryOn429?: boolean;
+  /** max wait for a global-limiter slot per request. Default 2000 ms. */
+  globalMaxWaitMs?: number;
 }
 
 export const REQUEST_TIMEOUT_MS = 10_000;
@@ -66,6 +73,8 @@ export function createHttpRiotClient(options: HttpRiotClientOptions): RiotClient
   const clock = options.clock ?? systemClock;
   const fetchImpl = options.fetchImpl ?? fetch;
   const maxRetries = Math.max(0, options.maxRetries ?? 3);
+  const retryOn429 = options.retryOn429 ?? true;
+  const globalMaxWaitMs = options.globalMaxWaitMs ?? 2_000;
   const platform = options.platform.toLowerCase();
   const region = options.region.toLowerCase();
   if (!HOST_SAFE.test(platform) || !HOST_SAFE.test(region)) {
@@ -75,9 +84,13 @@ export function createHttpRiotClient(options: HttpRiotClientOptions): RiotClient
   const platformBase = `https://${platform}.api.riotgames.com`;
   const enc = encodeURIComponent;
 
-  async function request(url: string): Promise<unknown> {
+  async function request(url: string, routingValue: string, method: string): Promise<unknown> {
     let attempt = 0;
     for (;;) {
+      if (options.globalLimiter) {
+        const slot = await options.globalLimiter.acquire(routingValue, method, globalMaxWaitMs);
+        if (!slot.ok) throw new RiotApiError("rate_limited", 429, Math.max(1, Math.ceil(slot.retryAfterMs / 1000)));
+      }
       await limiter.acquire();
       let res: Response;
       try {
@@ -110,7 +123,7 @@ export function createHttpRiotClient(options: HttpRiotClientOptions): RiotClient
       if (status === 404) throw new RiotApiError("not_found", status);
       if (status === 429) {
         const retryAfterS = parseRetryAfter(res.headers.get("Retry-After"));
-        if (attempt < maxRetries) {
+        if (retryOn429 && attempt < maxRetries) {
           await clock.sleep(retryAfterS * 1000);
           attempt++;
           continue;
@@ -132,7 +145,7 @@ export function createHttpRiotClient(options: HttpRiotClientOptions): RiotClient
 
   return {
     async getAccountByRiotId(gameName, tagLine) {
-      const data = await request(`${regionBase}/riot/account/v1/accounts/by-riot-id/${enc(gameName)}/${enc(tagLine)}`);
+      const data = await request(`${regionBase}/riot/account/v1/accounts/by-riot-id/${enc(gameName)}/${enc(tagLine)}`, region, "account");
       if (!isRecord(data) || typeof data.puuid !== "string") throw new RiotApiError("bad_response", 200);
       return data as unknown as AccountDto;
     },
@@ -140,8 +153,9 @@ export function createHttpRiotClient(options: HttpRiotClientOptions): RiotClient
     async getMatchIds(puuid, query) {
       const count = Math.min(100, Math.max(1, Math.trunc(query.count)));
       const start = Math.max(0, Math.trunc(query.start));
-      const qs = new URLSearchParams({ queue: String(query.queue), start: String(start), count: String(count) });
-      const data = await request(`${regionBase}/lol/match/v5/matches/by-puuid/${enc(puuid)}/ids?${qs.toString()}`);
+      const qs = new URLSearchParams({ start: String(start), count: String(count) });
+      if (query.queue !== undefined) qs.set("queue", String(query.queue));
+      const data = await request(`${regionBase}/lol/match/v5/matches/by-puuid/${enc(puuid)}/ids?${qs.toString()}`, region, "match-ids");
       if (!Array.isArray(data) || !data.every((x) => typeof x === "string")) {
         throw new RiotApiError("bad_response", 200);
       }
@@ -149,7 +163,7 @@ export function createHttpRiotClient(options: HttpRiotClientOptions): RiotClient
     },
 
     async getMatch(matchId) {
-      const data = await request(`${regionBase}/lol/match/v5/matches/${enc(matchId)}`);
+      const data = await request(`${regionBase}/lol/match/v5/matches/${enc(matchId)}`, region, "match");
       if (!isRecord(data) || !isRecord(data.info) || !Array.isArray(data.info.participants)) {
         throw new RiotApiError("bad_response", 200);
       }
@@ -159,14 +173,14 @@ export function createHttpRiotClient(options: HttpRiotClientOptions): RiotClient
     async getLeagueEntries(puuid) {
       let data: unknown;
       try {
-        data = await request(`${platformBase}/lol/league/v4/entries/by-puuid/${enc(puuid)}`);
+        data = await request(`${platformBase}/lol/league/v4/entries/by-puuid/${enc(puuid)}`, platform, "league");
       } catch (err) {
         if (!(err instanceof RiotApiError) || err.kind !== "not_found") throw err;
         // Documented fallback (ARCHITECTURE §7): summoner-v4 → league-v4 by-summoner.
-        const summoner = await request(`${platformBase}/lol/summoner/v4/summoners/by-puuid/${enc(puuid)}`);
+        const summoner = await request(`${platformBase}/lol/summoner/v4/summoners/by-puuid/${enc(puuid)}`, platform, "summoner");
         const id = isRecord(summoner) ? (summoner as unknown as SummonerDto).id : undefined;
         if (typeof id !== "string" || id === "") return [];
-        data = await request(`${platformBase}/lol/league/v4/entries/by-summoner/${enc(id)}`);
+        data = await request(`${platformBase}/lol/league/v4/entries/by-summoner/${enc(id)}`, platform, "league");
       }
       if (!Array.isArray(data)) throw new RiotApiError("bad_response", 200);
       return data as LeagueEntryDto[];

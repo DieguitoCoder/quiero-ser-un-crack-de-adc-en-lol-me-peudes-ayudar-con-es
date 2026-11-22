@@ -35,3 +35,32 @@ export function zodFieldErrors(error: z.ZodError): Record<string, string> {
   }
   return fields;
 }
+
+/* ---------------- v2 ---------------- */
+
+/** POST /api/sync body (empty body allowed). */
+export const syncBatchInputSchema = z.object({
+  cursor: z.string().max(512, "Cursor inválido").nullable().optional(),
+});
+
+/** GET /api/matches v2: adds `queue` (parsed later by lib/queues parseQueueFilter). */
+export const matchListQueryV2Schema = matchListQuerySchema.extend({
+  queue: z.string().max(20, "Cola inválida").default("all"),
+});
+
+/**
+ * "Name#TAG" or URL form "Name-TAG" (split on the LAST separator). Riot: gameName 3..16, tagLine 3..5.
+ * Returns null when malformed.
+ */
+export function parseRiotIdInput(raw: string): { gameName: string; tagLine: string } | null {
+  const s = raw.trim();
+  if (s.length === 0 || s.length > 40) return null;
+  const sep = s.includes("#") ? "#" : "-";
+  const idx = s.lastIndexOf(sep);
+  if (idx <= 0 || idx === s.length - 1) return null;
+  const gameName = s.slice(0, idx).trim();
+  const tagLine = s.slice(idx + 1).trim();
+  if (gameName.length < 1 || gameName.length > 16 || tagLine.length < 2 || tagLine.length > 5) return null;
+  if (/[#/\\?%]/.test(gameName) || !/^[\p{L}\p{N}]+$/u.test(tagLine)) return null;
+  return { gameName, tagLine };
+}

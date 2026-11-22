@@ -1,6 +1,6 @@
 # Climb Tracker — Architecture
 
-Status: **Accepted** (orion, 2026-11-22). No open decisions. Contract changes follow §14.
+Status: v1 **Accepted** (orion, 2026-11-22). **v2 (multi-user, Vercel + Supabase) is defined in §15 and supersedes v1 where they conflict.** Contract changes follow §14.
 
 Local, single-user web app that syncs the SoloQ games of **xDieguinho#9250** (LAN, platform `la1`, regional route `americas`) from the Riot API into a local SQLite file and turns them into progress charts, phase goals (Bronze → Platinum) and rule-based coaching tips. UI text is Spanish; code, comments and this document are English.
 
@@ -439,3 +439,244 @@ Numbers in messages: 1 decimal, percentages as integers. Champion names displaye
 `lib/types.ts`, `lib/errors.ts` and this document are the contract. Allowed without orion: additive optional fields / new union members, mirrored here with a changelog line. Breaking changes (rename/remove/semantics) require orion.
 
 - 2026-11-22 — v1 accepted (orion).
+- 2026-11-22 — v2 contracts added (§15): lib/queues.ts, lib/db/types.ts, lib/server-env.ts, v2 types/error codes, stubs (orion).
+
+---
+
+## 15. v2 — multi-user on Vercel + Supabase
+
+Single Next.js app on Vercel; Supabase provides Auth (magic link) and Postgres. All Riot traffic stays server-side with one production key. Users link a Riot ID (unverified) or log in with Riot RSO (verified). Match data is shared and public; journal/profile are private.
+
+```
+Browser ──(Supabase session cookies, @supabase/ssr)──► Next.js on Vercel (Node runtime)
+  middleware.ts: refresh session, gate private pages            ┌── lib/auth  (Supabase Auth, RSO, AUTH_MOCK)
+  app/api/** → requireViewer() → lib/services/v2 ───────────────┼── lib/sync/batch (≤15 matches/call, lease, cooldown)
+                                                                ├── lib/riot (+ global-limiter in Postgres)
+                                                                └── lib/db/repos ──Db──► postgres.js ─► Supavisor :6543 ─► Postgres (RLS deny-all)
+Tests/local: same repos ──Db──► PGlite (same supabase/migrations/*.sql), RIOT_MOCK=1, AUTH_MOCK=1
+```
+
+### 15.1 ADRs
+
+**ADR-008 Postgres driver: `postgres` (porsager) over pooled DATABASE_URL; supabase-js only for Auth.** Context: repositories need plain parameterized SQL, transactions and one code path for PGlite and prod. Options: (a) supabase-js/PostgREST for data — needs RLS policies per query shape, no multi-statement transactions, different API from PGlite; (b) `pg` — fine, heavier, more serverless config; (c) `postgres.js` — tiny, `unsafe(sql, params)`, works with Supavisor transaction mode when `prepare: false`. Decision: (c), `max: 1`, `idle_timeout: 20`, int8 parsed to number, module singleton per warm lambda. Consequence: the server is the only data path; RLS is defense-in-depth (deny-all), not the authz mechanism. Reversible: only `lib/db/client.ts` knows the driver.
+
+**ADR-009 One `Db` port (`lib/db/types.ts`), PGlite in tests.** Same SQL migrations run in Vitest (PGlite in-memory) and Supabase. Repos use only SQL PGlite supports (no extensions, no `auth.*` outside guarded DO blocks). Trade-off: PGlite is single-connection, so lease/rate-limit races are tested by logic, not real parallelism.
+
+**ADR-010 RLS on, zero policies.** All tables `enable row level security` with no policies: the anon key can read/write nothing via PostgREST. Every per-user repo function takes `userId` and scopes by it. Never use the service-role key or DATABASE_URL in client code.
+
+**ADR-011 Auth: Supabase magic link now; RSO behind `RSO_ENABLED=1`, ending in a Supabase session.** RSO callback → token exchange (PKCE S256 + state in httpOnly cookie `ct_rso`, 10 min) → `accounts/me` → find user by verified PUUID, or create one via admin API with synthetic email `<puuid>@rso.climbtracker.invalid` → `admin.generateLink({type:"magiclink"})` → server-side `verifyOtp({token_hash})` sets session cookies. One session mechanism app-wide. `AUTH_MOCK=1` only outside production (`getServerEnv` throws).
+
+**ADR-012 Shared match store with all participants.** `matches` + `match_participants` keyed by (match_id, puuid) for every player: friends in the same game cost one fetch; public search can show anyone. ~10 rows/match, no raw_json (storage budget).
+
+**ADR-013 Resumable batched sync.** Vercel functions are short-lived and share no memory: per call ≤ `SYNC_BATCH_SIZE`=15 matches within ~8 s; state in `sync_state` (pending ids, backfill offset); cross-instance lease (`lease_until`); 2-min cooldown set when a chain finishes. Client loops `POST /api/sync` with the returned `cursor` while `hasMore`. Riot limits counted per routing value (`americas`, `la1`) in `rate_limit_buckets` (fixed windows); on 429 honour Retry-After by ending the batch. Supersedes ADR-007.
+
+**ADR-014 All queues stored; coach only on Summoner's Rift.** `lib/queues.ts` is the catalog; coach tips/goals run only for `coachEligible` queues; rank/LP history per ranked queue (420, 440). Supersedes "SoloQ only".
+
+### 15.2 SQL schema (authoritative files: `supabase/migrations/*.sql`)
+
+```sql
+-- Climb Tracker v2 schema. Owner: quartz. PORTABLE: must run unchanged on Supabase Postgres AND PGlite.
+-- Supabase-only statements (auth schema) live in 0002 inside guarded DO blocks.
+-- Timestamps are epoch milliseconds (bigint) so lib/types domain shapes stay unchanged.
+
+create table if not exists schema_migrations (
+  name text primary key,
+  applied_at bigint not null
+);
+
+-- One linked Riot account per app user. user_id = auth.users.id (FK added in 0002 on Supabase).
+create table if not exists profiles (
+  user_id uuid primary key,
+  puuid text,
+  game_name text,
+  tag_line text,
+  platform text not null default 'la1',
+  verified boolean not null default false,
+  created_at bigint not null,
+  updated_at bigint not null
+);
+create index if not exists profiles_puuid_idx on profiles (puuid);
+-- A PUUID can be claimed as verified (RSO) by at most one user.
+create unique index if not exists profiles_verified_puuid_uq on profiles (puuid) where verified;
+
+-- Shared cache of Riot accounts (tracked users, public search).
+create table if not exists summoners (
+  puuid text primary key,
+  game_name text not null,
+  tag_line text not null,
+  platform text not null,
+  updated_at bigint not null
+);
+create index if not exists summoners_riot_id_idx on summoners (lower(game_name), lower(tag_line));
+
+-- Shared: one row per match, all queues. No raw_json in v2 (Supabase storage budget).
+create table if not exists matches (
+  match_id text primary key,
+  platform text not null,
+  game_creation bigint not null,
+  game_duration_s integer not null,
+  queue_id integer not null,
+  patch text not null,
+  is_remake boolean not null default false,
+  inserted_at bigint not null
+);
+
+-- Shared: one row per (match, player). Sync stores ALL 10 participants (Arena: all 16).
+-- game_creation / queue_id are denormalized for per-player list queries.
+create table if not exists match_participants (
+  match_id text not null references matches (match_id) on delete cascade,
+  puuid text not null,
+  game_creation bigint not null,
+  queue_id integer not null,
+  riot_id_game_name text,
+  riot_id_tag_line text,
+  champion_id integer not null,
+  champion_name text not null,
+  team_id integer not null,
+  team_position text not null default '',
+  win boolean not null,
+  kills integer not null,
+  deaths integer not null,
+  assists integer not null,
+  cs_total integer not null,
+  gold_earned integer not null,
+  damage_to_champions integer not null,
+  vision_score integer not null,
+  control_wards_bought integer not null,
+  team_kills integer not null,
+  opponent_champion_id integer,
+  opponent_champion_name text,
+  opponent_cs_total integer,
+  cs_diff_10 double precision,
+  max_cs_advantage double precision,
+  placement integer, -- Arena only (1..8)
+  primary key (match_id, puuid)
+);
+create index if not exists mp_puuid_creation_idx on match_participants (puuid, game_creation desc);
+create index if not exists mp_puuid_queue_creation_idx on match_participants (puuid, queue_id, game_creation desc);
+
+-- Private per user.
+create table if not exists journal_entries (
+  user_id uuid not null references profiles (user_id) on delete cascade,
+  match_id text not null references matches (match_id) on delete cascade,
+  death_reasons jsonb not null default '[]'::jsonb,
+  lesson text not null default '',
+  tilt smallint check (tilt between 1 and 5),
+  updated_at bigint not null,
+  primary key (user_id, match_id)
+);
+
+-- Shared per PUUID; one LP history per ranked queue; written only when rank changed.
+create table if not exists rank_snapshots (
+  id bigint generated always as identity primary key,
+  puuid text not null,
+  queue_id integer not null check (queue_id in (420, 440)),
+  taken_at bigint not null,
+  tier text,
+  division text,
+  lp integer not null default 0,
+  wins integer not null default 0,
+  losses integer not null default 0
+);
+create index if not exists rank_snapshots_puuid_queue_idx on rank_snapshots (puuid, queue_id, taken_at desc);
+
+-- Shared per PUUID: resumable batched sync.
+create table if not exists sync_state (
+  puuid text primary key,
+  pending_match_ids text[] not null default '{}', -- discovered, not yet fetched (newest first)
+  backfill_start integer default 0,                -- match-v5 ids `start` for older history; null = done
+  last_sync_at bigint,
+  cooldown_until bigint not null default 0,        -- next allowed sync (2-min cooldown)
+  lease_until bigint not null default 0,           -- cross-instance lock for a running batch
+  last_error_code text,
+  last_error_at bigint,
+  updated_at bigint not null
+);
+
+-- Fixed-window counters shared by all serverless instances
+-- (keys: 'riot:americas:1s', 'riot:la1:120s', 'ip:search:<sha256(ip)>', ...).
+create table if not exists rate_limit_buckets (
+  key text primary key,
+  window_start bigint not null,
+  count integer not null
+);
+
+-- RLS. Owner: quartz. Portable part: RLS ON everywhere with NO policies, so the PostgREST roles
+-- (anon / authenticated via supabase-js) can read or write nothing. The only data path is the
+-- server over DATABASE_URL (table owner → bypasses RLS); repositories scope every query by user_id/puuid.
+alter table profiles enable row level security;
+alter table summoners enable row level security;
+alter table matches enable row level security;
+alter table match_participants enable row level security;
+alter table journal_entries enable row level security;
+alter table rank_snapshots enable row level security;
+alter table sync_state enable row level security;
+alter table rate_limit_buckets enable row level security;
+alter table schema_migrations enable row level security;
+
+-- Supabase-only: profiles → auth.users (cascade on auth user deletion). No-op on PGlite.
+do $$
+begin
+  if exists (select 1 from information_schema.tables where table_schema = 'auth' and table_name = 'users')
+     and not exists (select 1 from pg_constraint where conname = 'profiles_user_fk') then
+    execute 'alter table profiles add constraint profiles_user_fk foreign key (user_id) references auth.users (id) on delete cascade';
+  end if;
+end $$;
+```
+
+**RLS summary:** every table RLS-enabled, no policies → anon/authenticated roles get nothing. Server (table owner via DATABASE_URL) bypasses RLS. Privacy boundary = repo functions scoped by `userId` (`profiles`, `journal_entries`). Public data: `matches`, `match_participants`, `rank_snapshots`, `summoners`, `sync_state`. On Supabase, deleting the auth user cascades to `profiles` → `journal_entries`.
+
+### 15.3 API contracts (types: `lib/types.ts` v2 block; errors: `lib/errors.ts`)
+
+Private routes: `requireViewer()` → 401 `UNAUTHENTICATED`; no linked puuid → 409 `PROFILE_REQUIRED`. Error body unchanged `{ error: { code, message, fields?, retryAfterS? } }`. `?queue=` = `all` | `ranked|normal|aram|arena|other` | numeric id (`parseQueueFilter`; invalid → 422).
+
+| Method & path | Auth | Request | Response | Owner |
+|---|---|---|---|---|
+| POST /api/auth/magic-link | public, 5/min/IP | `MagicLinkInput` | 200 `MagicLinkResponse` | forge |
+| GET /auth/callback?code&next | public | Supabase PKCE code | 302 → `next` (relative only) | forge |
+| POST /api/auth/logout | session | – | 204 | forge |
+| GET /api/auth/rso/login?next | public | – | 302 to authorize URL; 404 `RSO_DISABLED` | forge |
+| GET /api/auth/rso/callback?code&state | public | – | 302; failure → `/entrar?error=RSO_FAILED` | forge |
+| GET /api/me | session | – | `MeResponse` | forge |
+| PUT /api/me/riot-id | session | `LinkRiotIdInput` | `LinkRiotIdResponse`; 404 `SUMMONER_NOT_FOUND`; 409 `RIOT_ID_TAKEN` | forge (calls cobalt `linkRiotId`) |
+| DELETE /api/me | session | – | 200 `DeleteAccountResponse` | forge (calls quartz `deleteUserData`) |
+| POST /api/sync | profile | `SyncBatchInput` `{cursor?}` | `SyncBatchResponse` `{newMatches, remaining, cursor, hasMore, cooldownUntil, totalMatches, rank:{solo,flex}, snapshotCreated, syncedAt, durationMs, mock}`; 429 `SYNC_COOLDOWN`+retryAfterS; 409 `SYNC_IN_PROGRESS` | cobalt |
+| GET /api/matches?queue=all&champion=&limit=20&offset=0 | profile | `MatchListQueryV2` | `MatchListResponseV2` | cobalt |
+| GET /api/matches/[id] | profile | – | `MatchDetailResponse` (tips [] when not coachEligible) | cobalt |
+| GET/PUT /api/journal/[matchId] | profile | `JournalInput` | `JournalResponse` (per user) | cobalt |
+| GET /api/stats?queue=420 | profile | – | `StatsResponseV2` (`coach` null when not coachEligible) | cobalt |
+| GET /api/goals?queue=420 | profile | coachEligible ids only | `GoalsResponseV2` | cobalt |
+| GET /api/search?riotId=Name%23TAG | public, 10/min/IP (sha256 IP key) | – | `PublicPlayerResponse`; 429 `RATE_LIMITED` | cobalt |
+| GET /api/status | – | – | v1; restrict to non-sensitive health or remove | cobalt |
+
+Pages (nova, later): `/entrar`, `/jugador/[riotId]` (segment `Name-TAG`, split on LAST `-`), `/privacidad`, `/terminos`, `/ajustes` (link Riot ID, delete account). Footer disclaimer: "Climb Tracker isn't endorsed by Riot Games and doesn't reflect the views or opinions of Riot Games or anyone officially involved in producing or managing Riot Games properties. Riot Games, and all associated properties are trademarks or registered trademarks of Riot Games, Inc."
+
+### 15.4 Env vars (`.env.example`; read only via `lib/server-env.ts` `getServerEnv()`)
+
+`APP_URL`; `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY` (public); `SUPABASE_SERVICE_ROLE_KEY` (server, auth admin only); `DATABASE_URL` (server, pooled :6543; empty → PGlite); `RIOT_API_KEY`; `RIOT_PLATFORM`=la1; `RIOT_REGION`=americas; `RIOT_MOCK`; `AUTH_MOCK` (throws in production); `RSO_ENABLED`, `RSO_CLIENT_ID`, `RSO_CLIENT_SECRET`, `RSO_REDIRECT_URI` (all required when RSO_ENABLED=1). `RIOT_ID`/`CLIMB_DB_PATH` are v1-only (import script).
+
+### 15.5 Ownership map (v2) — edit only your paths; contract changes go through orion
+
+| Agent | Owns | Fills |
+|---|---|---|
+| **orion** | `lib/types.ts`, `lib/errors.ts`, `lib/queues.ts`, `lib/db/types.ts`, `lib/server-env.ts`, this doc | – |
+| **quartz** | `supabase/migrations/**`, `lib/db/**` (except `types.ts`), `scripts/import-sqlite.ts`, `tests/db/**` | `lib/db/client.ts`, `lib/db/migrate.ts`, `lib/db/repos/**` (may split files; keep all exports in barrel `lib/db/repos/index.ts`, incl. `deleteUserData`, `consumeRateLimit`). FIRST deliverable: `tests/db/helpers.ts` `createTestDb(): Promise<Db>` (PGlite + migrations) used by everyone. Deletes v1 `lib/db/connection.ts`, `migrations.ts`, `repositories/**`, `index.ts` after cobalt switches. |
+| **cobalt** | `lib/riot/**`, `lib/sync/**`, `lib/services/**`, `lib/validation.ts`, `lib/api/**`, `lib/env.ts` (delete after moving to server-env), `app/api/{sync,matches,stats,goals,journal,search,status}/**`, `tests/{riot,sync,api}/**`, `tests/fixtures/riot/**` | `lib/sync/batch.ts`, `lib/riot/global-limiter.ts`, `lib/services/v2.ts`; `getMatchIds` without queue filter; mapper for all participants + Arena placement; fixtures for 440/400/450/1700. Uses `lib/queues.ts`. |
+| **forge** | `lib/auth/**`, `middleware.ts`, `app/api/auth/**`, `app/auth/**`, `app/api/me/**`, `tests/auth/**` | `lib/auth/index.ts` (split freely, keep exports). Only module allowed to import `@supabase/*`. |
+| **nova** (later) | `app/**` pages/layouts, `components/**` | – |
+
+Cross-team calls: forge → cobalt `linkRiotId`; forge → quartz `deleteUserData`, `getProfile`, `upsertProfile`, `findUserIdByVerifiedPuuid`; cobalt → quartz repos; cobalt/nova → forge `requireViewer`/`getViewer`. Until a dependency is implemented, mock it in your tests (`vi.mock`), do not edit it.
+
+### 15.6 Gotchas (v2)
+
+- postgres.js + Supavisor transaction mode: `prepare: false` is mandatory. Pooled URL (6543) on Vercel; direct URL (5432) only for migrations/import.
+- postgres.js returns int8 as string by default and PGlite differs: the `Db` adapter normalizes (lib/db/types.ts). `text[]`/`jsonb` binding also differs; adapters handle it, repos pass plain arrays/objects.
+- PGlite has no `auth` schema/roles: keep Supabase-only SQL inside guarded `DO` blocks (see 0002).
+- `@supabase/ssr` on Next 15: `cookies()` is async; in Server Components `setAll` throws (read-only) → wrap in try/catch, refresh in middleware. On the server use `getUser()` (verifies the JWT), never trust `getSession()`.
+- Magic-link redirect URLs must be allow-listed in Supabase Auth (`APP_URL/auth/callback`). Sanitize `next` (starts with `/`, not `//`).
+- RSO `accounts/me` takes `Authorization: Bearer <rso access token>`, not `X-Riot-Token`. Riot needs a production key + approved app for RSO/multi-user; privacy/terms pages and the disclaimer are part of approval.
+- Riot ID in URLs: `#` is a fragment → `Name-TAG`, split on the last `-`; `encodeURIComponent` (spaces/unicode).
+- Serverless: no module-level locks (v1 `inFlight`) → `acquireSyncLease`. Set `export const maxDuration` on `/api/sync`; keep `SYNC_TIME_BUDGET_MS` below it.
+- Public search spends Riot quota for anonymous users: IP rate limit + at most one batch per stale puuid, never a full backfill.
+- `better-sqlite3` is a devDependency (import script only, `npm run db:import` via tsx); nothing under `app/`/`lib/` may import it once v1 repos are gone.
+- v1 tests still pass against v1 code; owners migrate or `it.skip` them with `// TODO(<owner>): v2` when switching to v2.

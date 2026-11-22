@@ -4,7 +4,8 @@
 import "server-only";
 import { NextResponse } from "next/server";
 import { apiError, errorBody, httpStatusFor } from "@/lib/errors";
-import type { ApiError, ApiErrorBody, ServiceResult } from "@/lib/types";
+import { requireViewer } from "@/lib/auth";
+import type { ApiError, ApiErrorBody, ServiceResult, Viewer } from "@/lib/types";
 
 const NO_STORE = { "Cache-Control": "no-store" } as const;
 
@@ -27,5 +28,32 @@ export async function handle<T>(fn: () => Promise<NextResponse<T>>): Promise<Nex
   } catch (err) {
     console.error("[api] unexpected error:", err instanceof Error ? err.message : "unknown");
     return jsonError(apiError("INTERNAL_ERROR"));
+  }
+}
+
+/** Private route guard: 401 UNAUTHENTICATED (Spanish message) when signed out. */
+export async function withViewer<T>(
+  fn: (viewer: Viewer) => Promise<NextResponse<T | ApiErrorBody>>,
+): Promise<NextResponse<T | ApiErrorBody>> {
+  const viewer = await requireViewer();
+  if (!viewer.ok) return jsonError(viewer.error);
+  return fn(viewer.data);
+}
+
+/** Best-effort client IP (Vercel sets x-forwarded-for; first hop is the client). */
+export function clientIp(request: Request): string {
+  const xff = request.headers.get("x-forwarded-for");
+  const first = xff?.split(",")[0]?.trim();
+  return first || request.headers.get("x-real-ip")?.trim() || "unknown";
+}
+
+/** Parses a JSON body; empty body → {}. null on malformed JSON. */
+export async function readJson(request: Request): Promise<unknown> {
+  const text = await request.text();
+  if (text.trim() === "") return {};
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    return null;
   }
 }

@@ -1,5 +1,5 @@
 /**
- * RIOT_MOCK=1 client backed by tests/fixtures/riot/**. Owner: cobalt.
+ * RIOT_MOCK=1 client backed by lib/riot/fixtures/** (shipped with the app so mock mode works on deploy). Owner: cobalt.
  * Layout (ARCHITECTURE §7): account.json, match-ids.json, matches/{id}.json, league-entries.json.
  * Behaves like the HTTP client: unknown match → RiotApiError("not_found").
  */
@@ -32,6 +32,12 @@ export function createFixtureRiotClient(fixturesDir: string): RiotClient {
     return readJson<AccountDto>(accountFile);
   }
 
+  async function getMatch(matchId: string): Promise<MatchDto> {
+    // Prevent path traversal: only well-formed match ids map to files.
+    if (!SAFE_MATCH_ID.test(matchId)) throw new RiotApiError("not_found", 404);
+    return readJson<MatchDto>(path.join(fixturesDir, "matches", `${matchId}.json`));
+  }
+
   return {
     async getAccountByRiotId(gameName, tagLine) {
       const acc = await account();
@@ -45,14 +51,18 @@ export function createFixtureRiotClient(fixturesDir: string): RiotClient {
       if (acc.puuid !== puuid) return [];
       const ids = await readJson<string[]>(path.join(fixturesDir, "match-ids.json"));
       const count = Math.min(100, Math.max(1, query.count));
-      return ids.slice(Math.max(0, query.start), Math.max(0, query.start) + count);
+      let filtered = ids;
+      if (query.queue !== undefined) {
+        const queue = query.queue;
+        const keep = await Promise.all(
+          ids.map(async (id) => (await getMatch(id).catch(() => null))?.info.queueId === queue),
+        );
+        filtered = ids.filter((_, i) => keep[i]);
+      }
+      return filtered.slice(Math.max(0, query.start), Math.max(0, query.start) + count);
     },
 
-    async getMatch(matchId) {
-      // Prevent path traversal: only well-formed match ids map to files.
-      if (!SAFE_MATCH_ID.test(matchId)) throw new RiotApiError("not_found", 404);
-      return readJson<MatchDto>(path.join(fixturesDir, "matches", `${matchId}.json`));
-    },
+    getMatch,
 
     async getLeagueEntries(puuid) {
       const acc = await account();

@@ -8,11 +8,12 @@ import { championDisplayName } from "@/lib/ddragon";
 import { ChampionIcon } from "@/components/ui/ChampionIcon";
 import { Badge } from "@/components/ui/Badge";
 import { cn } from "@/components/ui/cn";
+import { queueInfo } from "@/lib/queues";
 
 export interface MatchRowProps {
-  match: MatchSummary;
-  /** Detail page, e.g. `/partidas/${match.matchId}`. */
-  href: string;
+  match: MatchSummary & { queueId?: number; placement?: number | null };
+  /** Detail page, e.g. `/partidas/${match.matchId}`. Omit for a non-link row (public pages). */
+  href?: string;
   className?: string;
 }
 
@@ -33,24 +34,25 @@ export function MatchRow({ match, href, className }: MatchRowProps) {
   const opponent = match.opponentChampionName ? championDisplayName(match.opponentChampionName) : null;
   const date = new Date(match.gameCreation);
 
-  return (
-    <Link
-      href={href}
-      className={cn(
+  const classes = cn(
+
         "group grid grid-cols-[auto_1fr_auto] items-center gap-x-3 gap-y-1 rounded-lg border border-border bg-surface/80 p-3",
         "border-l-4 transition-colors duration-150 hover:border-border-strong hover:bg-surface-2",
         "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-bright",
         "sm:grid-cols-[auto_minmax(0,1.4fr)_minmax(0,1fr)_auto] sm:gap-x-4",
         result === "win" ? "border-l-win" : result === "loss" ? "border-l-loss" : "border-l-border-strong",
         className,
-      )}
-    >
+  );
+  const content = (
+    <>
       <ChampionIcon championName={match.championName} size={44} alt="" />
 
       <div className="min-w-0">
         <p className="flex flex-wrap items-center gap-x-2 gap-y-1">
           <span className="truncate font-semibold text-text">{champion}</span>
           <Badge tone={result === "win" ? "win" : result === "loss" ? "loss" : "neutral"}>{resultLabel}</Badge>
+          {match.queueId !== undefined ? <Badge tone="neutral">{queueInfo(match.queueId).label}</Badge> : null}
+          {match.placement ? <Badge tone="gold">Puesto {match.placement}</Badge> : null}
           {match.hasJournal ? (
             <Badge tone="gold">
               <span className="sr-only">Tiene </span>Nota
@@ -94,6 +96,13 @@ export function MatchRow({ match, href, className }: MatchRowProps) {
       >
         ›
       </span>
+    </>
+  );
+  return href ? (
+    <Link href={href} className={classes}>
+      {content}
     </Link>
+  ) : (
+    <div className={classes}>{content}</div>
   );
 }

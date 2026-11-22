@@ -3,15 +3,17 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import type { ReactNode } from "react";
+import { PlayerSearch } from "@/components/features/PlayerSearch";
+import { SiteFooter } from "@/components/layout/SiteFooter";
 
 const NAV = [
   { href: "/", label: "Dashboard" },
   { href: "/partidas", label: "Partidas" },
   { href: "/metas", label: "Metas" },
-  { href: "/ajustes", label: "Ajustes" },
+  { href: "/cuenta", label: "Cuenta" },
 ] as const;
 
-export function AppShell({ children }: { children: ReactNode }) {
+export function AppShell({ children, signedIn }: { children: ReactNode; signedIn: boolean }) {
   const pathname = usePathname();
   return (
     <>
@@ -22,11 +24,11 @@ export function AppShell({ children }: { children: ReactNode }) {
         Saltar al contenido
       </a>
       <header className="border-b border-border bg-surface/95">
-        <div className="mx-auto flex max-w-5xl flex-col gap-2 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="mx-auto flex max-w-5xl flex-col gap-2 px-4 py-3 md:flex-row md:items-center md:justify-between">
           <p className="font-display text-xl font-semibold tracking-wide text-gold">Climb Tracker</p>
           <nav aria-label="Principal">
             <ul className="flex flex-wrap gap-1">
-              {NAV.map((item) => {
+              {(signedIn ? NAV : ([{ href: "/entrar", label: "Entrar" }] as const)).map((item) => {
                 const active = item.href === "/" ? pathname === "/" : pathname.startsWith(item.href);
                 return (
                   <li key={item.href}>
@@ -44,11 +46,13 @@ export function AppShell({ children }: { children: ReactNode }) {
               })}
             </ul>
           </nav>
+          <PlayerSearch />
         </div>
       </header>
       <main id="contenido" className="mx-auto w-full max-w-5xl px-4 py-6">
         {children}
       </main>
+      <SiteFooter />
     </>
   );
 }

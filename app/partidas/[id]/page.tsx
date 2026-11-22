@@ -2,13 +2,17 @@
 import Link from "next/link";
 import { ChampionIcon, Badge, Card, ErrorState, StatCard } from "@/components/ui";
 import { JournalForm } from "@/components/features/JournalForm";
-import { getMatchDetail } from "@/lib/services";
+import { gatePrivate } from "@/components/features/gate";
+import { queueInfo } from "@/lib/queues";
+import { getMatchDetailV2 } from "@/lib/services/v2";
 
 export const dynamic = "force-dynamic";
 
 export default async function MatchDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
-  const result = await getMatchDetail(id).catch(() => null);
+  const gate = await gatePrivate(`/partidas/${id}`);
+  if (!gate.viewer) return gate.node;
+  const result = await getMatchDetailV2(gate.viewer, id).catch(() => null);
   if (!result) return <ErrorState message="No se pudo leer la partida. Recarga la página." />;
   if (!result.ok) {
     return (
@@ -25,6 +29,7 @@ export default async function MatchDetailPage({ params }: { params: Promise<{ id
     );
   }
   const { match: m, tips, journal } = result.data;
+  const queue = queueInfo(m.queueId);
 
   return (
     <div className="flex flex-col gap-6">
@@ -41,6 +46,7 @@ export default async function MatchDetailPage({ params }: { params: Promise<{ id
             {new Date(m.gameCreation).toLocaleString("es")} · parche {m.patch}
           </p>
         </div>
+        <Badge tone="neutral">{queue.label}</Badge>
         {m.isRemake ? <Badge tone="neutral">Remake</Badge> : <Badge tone={m.win ? "win" : "loss"}>{m.win ? "Victoria" : "Derrota"}</Badge>}
       </div>
 
@@ -52,15 +58,19 @@ export default async function MatchDetailPage({ params }: { params: Promise<{ id
         <StatCard label="Duración" value={`${Math.round(m.durationMin)} min`} />
         <StatCard label="Oro/min" value={Math.round(m.goldPerMin)} />
         <StatCard label="Daño/min" value={Math.round(m.damagePerMin)} />
+        {queue.coachEligible ? (
         <StatCard
           label="Rival de línea"
           value={m.opponentChampionName ?? "Sin datos"}
           hint={m.csDiffVsOpponent === null ? undefined : `${m.csDiffVsOpponent > 0 ? "+" : ""}${m.csDiffVsOpponent} CS`}
         />
+        ) : null}
       </div>
 
       <Card title="Consejos del coach">
-        {tips.length === 0 ? (
+        {!queue.coachEligible ? (
+          <p className="text-sm text-muted">El coach solo analiza partidas de la Grieta del Invocador.</p>
+        ) : tips.length === 0 ? (
           <p className="text-sm text-muted">No hay consejos para esta partida.</p>
         ) : (
           <ul className="flex flex-col gap-2">

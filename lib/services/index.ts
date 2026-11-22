@@ -63,7 +63,7 @@ function sharedLimiter(): RateLimiter {
   return globalForRiot.__climbRiotLimiter;
 }
 
-export const MOCK_FIXTURES_DIR = path.join(process.cwd(), "tests", "fixtures", "riot");
+export const MOCK_FIXTURES_DIR = path.join(process.cwd(), "lib", "riot", "fixtures");
 
 function trackedPuuid(db: Db): string | null {
   return getSetting(db, "tracked_puuid");

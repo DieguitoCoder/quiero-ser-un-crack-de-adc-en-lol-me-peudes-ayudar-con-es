@@ -5,7 +5,7 @@ import { createFixtureRiotClient } from "@/lib/riot/mock";
 import { mapMatch, soloQueueEntry } from "@/lib/riot/mappers";
 import type { MatchRecord } from "@/lib/types";
 
-const riot = createFixtureRiotClient(path.join(process.cwd(), "tests/fixtures/riot"));
+const riot = createFixtureRiotClient(path.join(process.cwd(), "lib/riot/fixtures"));
 
 async function loadAll(): Promise<MatchRecord[]> {
   const acc = await riot.getAccountByRiotId("xDieguinho", "9250");

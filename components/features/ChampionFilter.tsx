@@ -1,6 +1,6 @@
 "use client";
-/** Updates ?champion= on /partidas. */
-import { usePathname, useRouter } from "next/navigation";
+/** Updates ?champion= keeping the current ?queue=. */
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 
 export interface ChampionFilterProps {
   champions: string[];
@@ -10,6 +10,7 @@ export interface ChampionFilterProps {
 export function ChampionFilter({ champions, selected }: ChampionFilterProps) {
   const router = useRouter();
   const pathname = usePathname();
+  const search = useSearchParams();
   return (
     <div className="flex flex-wrap items-center gap-2">
       <label htmlFor="champion-filter" className="text-sm text-muted">
@@ -19,8 +20,11 @@ export function ChampionFilter({ champions, selected }: ChampionFilterProps) {
         id="champion-filter"
         value={selected ?? ""}
         onChange={(e) => {
-          const value = e.target.value;
-          router.push(value ? `${pathname}?champion=${encodeURIComponent(value)}` : pathname);
+          const qs = new URLSearchParams(search.toString());
+          if (e.target.value) qs.set("champion", e.target.value);
+          else qs.delete("champion");
+          const s = qs.toString();
+          router.push(s ? `${pathname}?${s}` : pathname);
         }}
         className="min-h-11 rounded-md border border-border bg-surface-2 px-3 text-text focus-visible:outline focus-visible:outline-2 focus-visible:outline-gold"
       >

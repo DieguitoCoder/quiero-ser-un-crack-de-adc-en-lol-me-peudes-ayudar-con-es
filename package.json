@@ -13,11 +13,15 @@
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "db:import": "tsx scripts/import-sqlite.ts"
   },
   "dependencies": {
-    "better-sqlite3": "^13.2.0",
+    "@electric-sql/pglite": "^0.5.17",
+    "@supabase/ssr": "^0.12.7",
+    "@supabase/supabase-js": "^2.119.2",
     "next": "^15.5.29",
+    "postgres": "^4.1.1",
     "react": "^19.3.1",
     "react-dom": "^19.3.1",
     "server-only": "^0.0.1",
@@ -30,9 +34,11 @@
     "@types/node": "^24.19.2",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
+    "better-sqlite3": "^13.2.0",
     "eslint": "^9.39.5",
     "eslint-config-next": "^15.5.29",
     "tailwindcss": "^4.3.5",
+    "tsx": "^4.23.15",
     "typescript": "^5.9.3",
     "vitest": "^5.1.1"
   }

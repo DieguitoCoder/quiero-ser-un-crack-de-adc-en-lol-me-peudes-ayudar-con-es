@@ -10,7 +10,7 @@ import { RiotApiError } from "@/lib/riot/errors";
 import { createFixtureRiotClient } from "@/lib/riot/mock";
 import { SYNC_MAX_NEW_MATCHES, syncPlayer, type SyncDeps } from "@/lib/sync/sync";
 
-const FIXTURES = path.join(process.cwd(), "tests/fixtures/riot");
+const FIXTURES = path.join(process.cwd(), "lib/riot/fixtures");
 let db: Db | null = null;
 
 function deps(riot: RiotClient = createFixtureRiotClient(FIXTURES)): SyncDeps {
